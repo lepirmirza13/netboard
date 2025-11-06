@@ -14,21 +14,65 @@ pub async fn run_client(server_addr: SocketAddr) -> Result<()> {
 
     let socket = std::sync::Arc::new(socket);
 
-    // Spawn event listener in blocking thread
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    // Find all input devices
+    let mut devices = Vec::new();
+    for entry in std::fs::read_dir("/dev/input")? {
+        let entry = entry?;
+        let path = entry.path();
 
-    std::thread::spawn(move || {
-        if let Err(e) = rdev::listen(move |event| {
-            if let Some(input_event) = InputEvent::from_rdev(&event) {
-                // Send to channel (non-blocking)
-                let _ = tx.send(input_event);
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if name.starts_with("event") {
+                match evdev::Device::open(&path) {
+                    Ok(device) => {
+                        println!("  Found device: {} ({})",
+                            device.name().unwrap_or("unknown"),
+                            path.display()
+                        );
+                        devices.push(device);
+                    }
+                    Err(e) => {
+                        eprintln!("  Could not open {}: {}", path.display(), e);
+                    }
+                }
             }
-        }) {
-            eprintln!("Error listening to events: {:?}", e);
         }
-    });
+    }
+
+    if devices.is_empty() {
+        anyhow::bail!("No input devices found! Are you running with sudo?");
+    }
 
     println!("Client started successfully!");
+    println!("Monitoring {} input device(s)", devices.len());
+
+    // Create channel for sending events
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+    // Spawn a task for each device
+    for mut device in devices {
+        let tx = tx.clone();
+        tokio::task::spawn_blocking(move || {
+            loop {
+                match device.fetch_events() {
+                    Ok(events) => {
+                        for event in events {
+                            let input_event = InputEvent::from_evdev(&event);
+                            if tx.send(input_event).is_err() {
+                                return; // Channel closed
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if e.kind() != std::io::ErrorKind::WouldBlock {
+                            eprintln!("Error reading device: {}", e);
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                }
+            }
+        });
+    }
 
     // Receive from channel and send over network
     while let Some(event) = rx.recv().await {

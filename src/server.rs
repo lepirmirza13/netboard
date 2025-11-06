@@ -1,5 +1,6 @@
 use crate::protocol::InputEvent;
 use anyhow::Result;
+use evdev::{uinput::VirtualDeviceBuilder, AttributeSet, Key, RelativeAxisType};
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 
@@ -8,28 +9,54 @@ pub async fn run_server(bind_addr: SocketAddr) -> Result<()> {
     println!("Listening on {}", bind_addr);
     println!("Press Ctrl+C to stop");
 
+    // Create virtual keyboard device with all possible keys
+    let mut keys = AttributeSet::<Key>::new();
+    // Add all standard keyboard keys
+    for key_code in 0..=0x2FF {
+        keys.insert(Key(key_code));
+    }
+
+    let mut rel_axes = AttributeSet::<RelativeAxisType>::new();
+    rel_axes.insert(RelativeAxisType::REL_X);
+    rel_axes.insert(RelativeAxisType::REL_Y);
+    rel_axes.insert(RelativeAxisType::REL_WHEEL);
+    rel_axes.insert(RelativeAxisType::REL_HWHEEL);
+
+    let virtual_device = VirtualDeviceBuilder::new()?
+        .name("NetBoard Virtual Device")
+        .with_keys(&keys)?
+        .with_relative_axes(&rel_axes)?
+        .build()?;
+
+    println!("Server started successfully!");
+    println!("Virtual input device created");
+    println!("Waiting for input from client...");
+
     let socket = UdpSocket::bind(bind_addr).await?;
     let mut buf = vec![0u8; 65535];
 
-    println!("Server started successfully!");
-    println!("Waiting for input from client...");
+    // Use std::sync::Mutex for thread-safe access to virtual_device
+    let virtual_device = std::sync::Arc::new(std::sync::Mutex::new(virtual_device));
 
     loop {
         match socket.recv_from(&mut buf).await {
-            Ok((len, _addr)) => {
+            Ok((len, addr)) => {
                 let data = &buf[..len];
 
                 match bincode::deserialize::<InputEvent>(data) {
                     Ok(event) => {
-                        // Simulate the event
-                        if let Some(event_type) = event.to_rdev() {
-                            if let Err(e) = rdev::simulate(&event_type) {
-                                eprintln!("Failed to simulate event: {:?}", e);
+                        let evdev_event = event.to_evdev();
+                        let device = virtual_device.clone();
+
+                        // Emit in blocking task to avoid blocking async runtime
+                        tokio::task::spawn_blocking(move || {
+                            if let Ok(mut dev) = device.lock() {
+                                let _ = dev.emit(&[evdev_event]);
                             }
-                        }
+                        });
                     }
                     Err(e) => {
-                        eprintln!("Failed to deserialize event: {}", e);
+                        eprintln!("Failed to deserialize event from {}: {}", addr, e);
                     }
                 }
             }
