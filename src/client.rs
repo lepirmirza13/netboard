@@ -1,12 +1,15 @@
 use crate::protocol::InputEvent;
 use anyhow::Result;
+use evdev::Key;
+use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use tokio::net::UdpSocket;
 
 pub async fn run_client(server_addr: SocketAddr) -> Result<()> {
     println!("Starting client mode...");
     println!("Capturing input and sending to {}", server_addr);
-    println!("Press Ctrl+C to stop");
+    println!("Press Alt+Shift+Ctrl+E to stop and release devices");
 
     // Bind to any available port
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
@@ -14,7 +17,7 @@ pub async fn run_client(server_addr: SocketAddr) -> Result<()> {
 
     let socket = std::sync::Arc::new(socket);
 
-    // Find all input devices
+    // Find all input devices and store them for later ungrabbing
     let mut devices = Vec::new();
     for entry in std::fs::read_dir("/dev/input")? {
         let entry = entry?;
@@ -50,19 +53,55 @@ pub async fn run_client(server_addr: SocketAddr) -> Result<()> {
     println!("Client started successfully!");
     println!("Monitoring {} input device(s)", devices.len());
     println!("Input devices are GRABBED - they won't affect this PC");
-    println!("Press Ctrl+C to release devices and stop");
+    println!("Press Alt+Shift+Ctrl+E to exit");
 
     // Create channel for sending events
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
+    // Shared state for tracking pressed keys
+    let pressed_keys = Arc::new(Mutex::new(HashSet::new()));
+
     // Spawn a task for each device
     for mut device in devices {
         let tx = tx.clone();
+        let pressed_keys = pressed_keys.clone();
+
         tokio::task::spawn_blocking(move || {
             loop {
                 match device.fetch_events() {
                     Ok(events) => {
                         for event in events {
+                            // Track key presses for exit combo detection
+                            if event.event_type() == evdev::EventType::KEY {
+                                let key_code = event.code();
+                                let value = event.value();
+
+                                if let Ok(mut keys) = pressed_keys.lock() {
+                                    if value == 1 {
+                                        // Key pressed
+                                        keys.insert(key_code);
+
+                                        // Check for exit combination: Alt+Shift+Ctrl+E
+                                        let has_ctrl = keys.contains(&Key::KEY_LEFTCTRL.code())
+                                            || keys.contains(&Key::KEY_RIGHTCTRL.code());
+                                        let has_shift = keys.contains(&Key::KEY_LEFTSHIFT.code())
+                                            || keys.contains(&Key::KEY_RIGHTSHIFT.code());
+                                        let has_alt = keys.contains(&Key::KEY_LEFTALT.code())
+                                            || keys.contains(&Key::KEY_RIGHTALT.code());
+                                        let has_e = keys.contains(&Key::KEY_E.code());
+
+                                        if has_ctrl && has_shift && has_alt && has_e {
+                                            println!("\nExit hotkey detected! Releasing devices...");
+                                            // Exit - devices will be automatically released
+                                            std::process::exit(0);
+                                        }
+                                    } else if value == 0 {
+                                        // Key released
+                                        keys.remove(&key_code);
+                                    }
+                                }
+                            }
+
                             let input_event = InputEvent::from_evdev(&event);
                             if tx.send(input_event).is_err() {
                                 return; // Channel closed
