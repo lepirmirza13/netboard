@@ -52,12 +52,17 @@ pub async fn run_server(bind_addr: SocketAddr) -> Result<()> {
                         let evdev_event = event.to_evdev();
                         println!("Received event: type={}, code={}, value={}",
                             event.event_type, event.code, event.value);
+
+                        // Create SYN_REPORT event to flush the input
+                        let syn_event = evdev::InputEvent::new(evdev::EventType::SYNCHRONIZATION, 0, 0);
+
                         let device = virtual_device.clone();
 
                         // Emit in blocking task to avoid blocking async runtime
                         tokio::task::spawn_blocking(move || {
                             if let Ok(mut dev) = device.lock() {
-                                if let Err(e) = dev.emit(&[evdev_event]) {
+                                // Emit the actual event followed by SYN_REPORT
+                                if let Err(e) = dev.emit(&[evdev_event, syn_event]) {
                                     eprintln!("Failed to emit event: {}", e);
                                 }
                             }
