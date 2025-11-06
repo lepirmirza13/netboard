@@ -23,11 +23,16 @@ pub async fn run_client(server_addr: SocketAddr) -> Result<()> {
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             if name.starts_with("event") {
                 match evdev::Device::open(&path) {
-                    Ok(device) => {
-                        println!("  Found device: {} ({})",
-                            device.name().unwrap_or("unknown"),
-                            path.display()
-                        );
+                    Ok(mut device) => {
+                        let device_name = device.name().unwrap_or("unknown").to_string();
+
+                        // Grab the device to prevent local input
+                        if let Err(e) = device.grab() {
+                            eprintln!("  Warning: Could not grab {}: {}", path.display(), e);
+                        } else {
+                            println!("  Grabbed device: {} ({})", device_name, path.display());
+                        }
+
                         devices.push(device);
                     }
                     Err(e) => {
@@ -44,6 +49,8 @@ pub async fn run_client(server_addr: SocketAddr) -> Result<()> {
 
     println!("Client started successfully!");
     println!("Monitoring {} input device(s)", devices.len());
+    println!("Input devices are GRABBED - they won't affect this PC");
+    println!("Press Ctrl+C to release devices and stop");
 
     // Create channel for sending events
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

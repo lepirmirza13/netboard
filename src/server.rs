@@ -9,18 +9,22 @@ pub async fn run_server(bind_addr: SocketAddr) -> Result<()> {
     println!("Listening on {}", bind_addr);
     println!("Press Ctrl+C to stop");
 
-    // Create virtual keyboard device with all possible keys
+    // Create virtual device with all input capabilities
     let mut keys = AttributeSet::<Key>::new();
-    // Add all standard keyboard keys
+
+    // Add all keyboard keys (includes mouse buttons BTN_LEFT, BTN_RIGHT, etc.)
     for key_code in 0..=0x2FF {
         keys.insert(Key(key_code));
     }
 
+    // Relative axes for mouse movement
     let mut rel_axes = AttributeSet::<RelativeAxisType>::new();
     rel_axes.insert(RelativeAxisType::REL_X);
     rel_axes.insert(RelativeAxisType::REL_Y);
     rel_axes.insert(RelativeAxisType::REL_WHEEL);
     rel_axes.insert(RelativeAxisType::REL_HWHEEL);
+    rel_axes.insert(RelativeAxisType::REL_WHEEL_HI_RES);
+    rel_axes.insert(RelativeAxisType::REL_HWHEEL_HI_RES);
 
     let virtual_device = VirtualDeviceBuilder::new()?
         .name("NetBoard Virtual Device")
@@ -46,12 +50,16 @@ pub async fn run_server(bind_addr: SocketAddr) -> Result<()> {
                 match bincode::deserialize::<InputEvent>(data) {
                     Ok(event) => {
                         let evdev_event = event.to_evdev();
+                        println!("Received event: type={}, code={}, value={}",
+                            event.event_type, event.code, event.value);
                         let device = virtual_device.clone();
 
                         // Emit in blocking task to avoid blocking async runtime
                         tokio::task::spawn_blocking(move || {
                             if let Ok(mut dev) = device.lock() {
-                                let _ = dev.emit(&[evdev_event]);
+                                if let Err(e) = dev.emit(&[evdev_event]) {
+                                    eprintln!("Failed to emit event: {}", e);
+                                }
                             }
                         });
                     }
